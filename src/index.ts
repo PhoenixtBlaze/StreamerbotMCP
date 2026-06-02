@@ -30,6 +30,10 @@ const client = new StreamerbotClient({
   eventBufferSize: parseInt(process.env.STREAMERBOT_EVENT_BUFFER ?? "200"),
 });
 
+// Prevent Node.js from crashing on unhandled 'error' events from the EventEmitter
+// (e.g. ECONNREFUSED when Streamer.bot isn't running yet — each tool call will retry)
+client.on("error", () => {});
+
 // ─── Helper: ensure connection ───────────────────────────────────────────────
 
 async function ensureConnected(): Promise<void> {
