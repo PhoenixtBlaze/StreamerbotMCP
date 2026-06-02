@@ -1,0 +1,33 @@
+{
+  "name": "streamerbot-mcp",
+  "version": "1.0.0",
+  "description": "Full-featured MCP server for controlling every aspect of Streamer.bot via its WebSocket API",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/index.js",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "watch": "tsc --watch"
+  },
+  "keywords": [
+    "mcp",
+    "streamerbot",
+    "streamer.bot",
+    "twitch",
+    "youtube",
+    "streaming"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "ws": "^8.18.0",
+    "zod": "^3.25.28"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "@types/ws": "^8.5.14",
+    "esbuild": "^0.28.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
