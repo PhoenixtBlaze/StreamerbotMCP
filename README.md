@@ -1,6 +1,6 @@
 # Streamer.bot MCP Server
 
-A full-featured [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that exposes **every capability of the [Streamer.bot](https://streamer.bot/) WebSocket API** as MCP tools and resources. Connect any MCP-compatible AI agent (GitHub Copilot, Claude Desktop, Cursor, etc.) and let it fully control your Streamer.bot instance.
+A Work in Progress but possibally a full-featured [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that exposes **every capability of the [Streamer.bot](https://streamer.bot/) WebSocket API** as MCP tools and resources. Connect any MCP-compatible AI agent (GitHub Copilot, Claude Desktop, Cursor, etc.) and let it fully control your Streamer.bot instance.
 
 ---
 
@@ -57,12 +57,14 @@ All configuration is via environment variables:
 
 Add to your VS Code `settings.json` or workspace `mcp.json`:
 
+Ensure you change [Directory of repo clone] in the bellow given json's to actual directory
+
 ```json
 {
   "mcpServers": {
     "streamerbot": {
       "command": "node",
-      "args": ["g:/StreamerbotMCP/dist/index.js"],
+      "args": ["[Directory of repo clone]/StreamerbotMCP/dist/index.js"],
       "env": {
         "STREAMERBOT_HOST": "127.0.0.1",
         "STREAMERBOT_PORT": "8080"
@@ -81,7 +83,7 @@ Add to `claude_desktop_config.json` (usually `%APPDATA%\Claude\claude_desktop_co
   "mcpServers": {
     "streamerbot": {
       "command": "node",
-      "args": ["g:/StreamerbotMCP/dist/index.js"],
+      "args": ["[Directory of repo clone]/StreamerbotMCP/dist/index.js"],
       "env": {
         "STREAMERBOT_HOST": "127.0.0.1",
         "STREAMERBOT_PORT": "8080",
