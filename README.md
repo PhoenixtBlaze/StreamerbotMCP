@@ -8,7 +8,7 @@ An **agent-native** [MCP](https://modelcontextprotocol.io/) server for [Streamer
 
 ## For streamers (one minute)
 
-1. Install **Streamer.bot**, enable **WebSocket Server** (Servers/Clients, note port e.g. `8081`).
+1. Install **Streamer.bot**, enable **WebSocket Server** (Servers/Clients, default port `8080`).
 2. Add this MCP server to Cursor / Claude (see below).
 3. Tell your AI: *“Set up my stream so the StreamElements overlay only shows in my ingame scene.”*
 4. The agent runs `validate_setup`, plans with `describe_automation`, guides you through a few UI clicks if needed, and tests with `do_action` — **no bot restart**.
@@ -44,7 +44,7 @@ npm run build
       "args": ["G:/StreamerbotMCP/dist/index.js"],
       "env": {
         "STREAMERBOT_HOST": "127.0.0.1",
-        "STREAMERBOT_PORT": "8081",
+        "STREAMERBOT_PORT": "8080",
         "STREAMERBOT_HTTP_PORT": "7474",
         "STREAMERBOT_PASSWORD": "",
         "STREAMERBOT_DATA_PATH": "E:/path/to/Streamer.bot/data",
@@ -62,7 +62,7 @@ npm run build
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STREAMERBOT_HOST` | `127.0.0.1` | Streamer.bot host |
-| `STREAMERBOT_PORT` | `8080` | WebSocket port |
+| `STREAMERBOT_PORT` | `8080` | WebSocket port (change if yours differs, e.g. `8081`) |
 | `STREAMERBOT_HTTP_PORT` | `7474` | HTTP server port |
 | `STREAMERBOT_ENDPOINT` | `/` | WebSocket path |
 | `STREAMERBOT_PASSWORD` | *(empty)* | WebSocket auth password |

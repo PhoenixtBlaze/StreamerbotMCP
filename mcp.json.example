@@ -5,7 +5,7 @@
       "args": ["G:/StreamerbotMCP/dist/index.js"],
       "env": {
         "STREAMERBOT_HOST": "127.0.0.1",
-        "STREAMERBOT_PORT": "8081",
+        "STREAMERBOT_PORT": "8080",
         "STREAMERBOT_HTTP_PORT": "7474",
         "STREAMERBOT_PASSWORD": "",
         "STREAMERBOT_DATA_PATH": "",
