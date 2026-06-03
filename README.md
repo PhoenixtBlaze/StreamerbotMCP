@@ -1,28 +1,27 @@
-# Streamer.bot MCP Server
+# Streamerbot MCP Server
 
-A Work in Progress but possibally a full-featured [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that exposes **every capability of the [Streamer.bot](https://streamer.bot/) WebSocket API** as MCP tools and resources. Connect any MCP-compatible AI agent (GitHub Copilot, Claude Desktop, Cursor, etc.) and let it fully control your Streamer.bot instance.
+An **agent-native** [MCP](https://modelcontextprotocol.io/) server for [Streamer.bot](https://streamer.bot/). Built for streamers who describe goals in plain language and let an AI agent configure, test, and run automations — without learning Streamer.bot internals.
+
+**v2 highlights:** compact action discovery, automation planning, live testing without restarts, C# script generation, scene/event helpers, bridge actions for globals, WebSocket auth, HTTP triggers.
 
 ---
 
-## Features
+## For streamers (one minute)
 
-- **23 MCP tools** covering every WebSocket API endpoint
-- **12 live resources** for read access to all major data stores
-- Persistent WebSocket connection with **automatic reconnection**
-- In-memory **ring-buffer event capture** — subscribe to any/all events and query them
-- Auto-subscribes to all 44+ event categories on startup
-- Works with **Twitch, YouTube, and Kick** platforms
-- Full support for **global variables, user variables, credits, commands, code triggers, chat**, and more
+1. Install **Streamer.bot**, enable **WebSocket Server** (Servers/Clients, note port e.g. `8081`).
+2. Add this MCP server to Cursor / Claude (see below).
+3. Tell your AI: *“Set up my stream so the StreamElements overlay only shows in my ingame scene.”*
+4. The agent runs `validate_setup`, plans with `describe_automation`, guides you through a few UI clicks if needed, and tests with `do_action` — **no bot restart**.
+
+Read [docs/live-dev-workflow.md](docs/live-dev-workflow.md) and [docs/automation-patterns.md](docs/automation-patterns.md).
 
 ---
 
 ## Prerequisites
 
-1. **Node.js 18+** installed
-2. **Streamer.bot** running with the **WebSocket Server enabled**:
-   - Open Streamer.bot → *Servers/Clients* → *WebSocket Server*
-   - Set port (default: `8080`) and click **Start**
-   - Optionally configure a password
+- **Node.js 18+**
+- **Streamer.bot** with **WebSocket Server** started (and optional **HTTP Server** on port `7474`)
+- If WebSocket password is enabled (v0.2.5+), set `STREAMERBOT_PASSWORD`
 
 ---
 
@@ -35,190 +34,126 @@ npm install
 npm run build
 ```
 
+### Cursor `mcp.json` example
+
+```json
+{
+  "mcpServers": {
+    "streamerbot": {
+      "command": "node",
+      "args": ["G:/StreamerbotMCP/dist/index.js"],
+      "env": {
+        "STREAMERBOT_HOST": "127.0.0.1",
+        "STREAMERBOT_PORT": "8081",
+        "STREAMERBOT_HTTP_PORT": "7474",
+        "STREAMERBOT_PASSWORD": "",
+        "STREAMERBOT_DATA_PATH": "E:/path/to/Streamer.bot/data",
+        "STREAMERBOT_PRIMITIVES": "{\"overlay_show\":\"SE Overlay Show\",\"overlay_hide\":\"SE Overlay Hide\"}"
+      }
+    }
+  }
+}
+```
+
 ---
 
 ## Configuration
 
-All configuration is via environment variables:
-
-| Variable                  | Default       | Description                                              |
-|---------------------------|---------------|----------------------------------------------------------|
-| `STREAMERBOT_HOST`        | `127.0.0.1`   | Host where Streamer.bot is running                       |
-| `STREAMERBOT_PORT`        | `8080`        | Streamer.bot WebSocket server port                       |
-| `STREAMERBOT_ENDPOINT`    | `/`           | WebSocket endpoint path                                  |
-| `STREAMERBOT_PASSWORD`    | *(empty)*     | Password if WebSocket auth is enabled                    |
-| `STREAMERBOT_EVENT_BUFFER`| `200`         | Max number of events to hold in the in-memory ring buffer|
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STREAMERBOT_HOST` | `127.0.0.1` | Streamer.bot host |
+| `STREAMERBOT_PORT` | `8080` | WebSocket port |
+| `STREAMERBOT_HTTP_PORT` | `7474` | HTTP server port |
+| `STREAMERBOT_ENDPOINT` | `/` | WebSocket path |
+| `STREAMERBOT_PASSWORD` | *(empty)* | WebSocket auth password |
+| `STREAMERBOT_EVENT_BUFFER` | `200` | Max buffered events |
+| `STREAMERBOT_DATA_PATH` | *(empty)* | Optional `data` folder for read-only `actions.json` index |
+| `STREAMERBOT_PRIMITIVES` | overlay show/hide names | JSON map of primitive keys → action names |
+| `STREAMERBOT_BRIDGE_SET_GLOBAL` | `MCP Set Global` | Bridge action for setting globals |
 
 ---
 
-## Adding to Your MCP Client
+## Agent workflow (start here)
 
-### VS Code (GitHub Copilot Agent)
+| Step | Tool |
+|------|------|
+| 1 | `get_agent_guide` |
+| 2 | `validate_setup` |
+| 3 | `describe_automation` with the user’s goal |
+| 4 | `get_ui_walkthrough` for any UI steps |
+| 5 | `test_action` / `trigger_primitive` to verify |
+| 6 | `generate_csharp_script` if custom logic is needed |
 
-Add to your VS Code `settings.json` or workspace `mcp.json`:
+**Agents should prefer** `list_action_groups` / `find_actions` over full `get_actions`.
 
-Ensure you change [Directory of repo clone] in the bellow given json's to actual directory
+---
 
-```json
-{
-  "mcpServers": {
-    "streamerbot": {
-      "command": "node",
-      "args": ["[Directory of repo clone]/StreamerbotMCP/dist/index.js"],
-      "env": {
-        "STREAMERBOT_HOST": "127.0.0.1",
-        "STREAMERBOT_PORT": "8080"
-      }
-    }
-  }
-}
-```
+## Tools (summary)
 
-### Claude Desktop
+### Setup & guidance
 
-Add to `claude_desktop_config.json` (usually `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+`get_agent_guide`, `validate_setup`, `get_ui_walkthrough`, `get_bridge_setup_guide`, `get_import_checklist`, `describe_automation`
 
-```json
-{
-  "mcpServers": {
-    "streamerbot": {
-      "command": "node",
-      "args": ["[Directory of repo clone]/StreamerbotMCP/dist/index.js"],
-      "env": {
-        "STREAMERBOT_HOST": "127.0.0.1",
-        "STREAMERBOT_PORT": "8080",
-        "STREAMERBOT_PASSWORD": "your-password-here"
-      }
-    }
-  }
-}
-```
+### Connection
+
+`connect`, `disconnect`, `get_connection_status`, `get_info`, `get_broadcaster`, `get_active_viewers`
+
+### Actions (compact + run)
+
+`list_action_groups`, `list_actions_in_group`, `find_actions`, `get_action_detail`, `get_actions`, `do_action`, `do_action_http`, `test_action`, `trigger_primitive`
+
+### Events & OBS
+
+`subscribe_preset`, `subscribe_to_events`, `subscribe_to_all_events`, `get_recent_events`, `summarize_recent_events`, `wait_for_event`, `get_current_scene`, …
+
+### State & chat
+
+`set_global_via_action`, `get_globals`, `get_global`, `send_message` (requires `confirm=true`), `get_commands`, credits tools
+
+### C# & disk
+
+`list_csharp_templates`, `generate_csharp_script`, `inspect_actions_from_disk`
+
+### Advanced
+
+`raw_request`, `execute_code_trigger`, Twitch/YouTube utilities
+
+Full list: build and inspect `src/index.ts` or ask the agent to call `get_agent_guide`.
+
+---
+
+## Resources
+
+| URI | Description |
+|-----|-------------|
+| `streamerbot://agent-guide` | Agent operating guide (markdown) |
+| `streamerbot://actions-summary` | Compact group summary |
+| `streamerbot://connection` | Connection + last scene |
+| `streamerbot://event-buffer` | Summarized recent events |
 
 ---
 
 ## Development
 
 ```bash
-# Run without building (uses ts-node)
-npm run dev
-
-# Build and run
 npm run build
 npm start
 ```
 
 ---
 
-## Tools Reference
+## Docs
 
-### Connection & Instance
-
-| Tool | Description |
-|------|-------------|
-| `get_connection_status` | Get current connection state and config |
-| `connect` | Connect (or reconnect) with optional host/port/password override |
-| `disconnect` | Disconnect from Streamer.bot |
-| `get_info` | Instance version, OS, and uptime |
-| `get_broadcaster` | Connected broadcaster accounts across all platforms |
-| `get_active_viewers` | Live viewer list |
-
-### Actions
-
-| Tool | Description |
-|------|-------------|
-| `get_actions` | List all actions (IDs, names, groups, enabled state) |
-| `do_action` | Execute any action by ID or name with optional arguments |
-
-### Events & Subscriptions
-
-| Tool | Description |
-|------|-------------|
-| `get_events` | All subscribable event categories and types |
-| `subscribe_to_events` | Subscribe to specific categories/types |
-| `subscribe_to_all_events` | Subscribe to every event at once |
-| `unsubscribe_from_events` | Remove specific subscriptions |
-| `get_recent_events` | Query the event buffer (with source/type filters) |
-| `clear_event_buffer` | Wipe the event buffer |
-| `get_subscribed_events` | List active subscriptions |
-
-### Code Triggers
-
-| Tool | Description |
-|------|-------------|
-| `get_code_triggers` | List all custom code triggers |
-| `execute_code_trigger` | Fire a code trigger by name with optional args |
-
-### Commands
-
-| Tool | Description |
-|------|-------------|
-| `get_commands` | List all chat commands and their config |
-
-### Credits
-
-| Tool | Description |
-|------|-------------|
-| `get_credits` | Fetch current credits roll data |
-| `test_credits` | Fill credits with test data |
-| `clear_credits` | Reset all credits |
-
-### Chat
-
-| Tool | Description |
-|------|-------------|
-| `send_message` | Send a chat message on Twitch, Kick, or YouTube |
-
-### Global Variables
-
-| Tool | Description |
-|------|-------------|
-| `get_globals` | All global variables (persisted or temporary) |
-| `get_global` | Single global variable by name |
-| `twitch_get_user_globals` | A specific user variable across all Twitch users |
-| `twitch_get_user_global` | All/specific variables for one Twitch user |
-
-### Emotes
-
-| Tool | Description |
-|------|-------------|
-| `twitch_get_emotes` | Available Twitch emotes |
-| `youtube_get_emotes` | Available YouTube emotes |
-
-### User Utilities
-
-| Tool | Description |
-|------|-------------|
-| `get_user_pronouns` | Look up a user's pronouns |
-
-### Advanced
-
-| Tool | Description |
-|------|-------------|
-| `raw_request` | Send an arbitrary JSON request to the WebSocket API |
+- [Live dev workflow (no restart)](docs/live-dev-workflow.md)
+- [Automation patterns](docs/automation-patterns.md)
+- [Scene overlay template](templates/scene-overlay-router.md)
+- [Roadmap / implemented features](docs/ROADMAP.md)
 
 ---
 
-## Resources Reference
+## Official Streamer.bot references
 
-| Resource URI | Description |
-|--------------|-------------|
-| `streamerbot://info` | Instance info |
-| `streamerbot://broadcaster` | Broadcaster account info |
-| `streamerbot://actions` | All defined actions |
-| `streamerbot://commands` | All defined commands |
-| `streamerbot://active-viewers` | Current live viewers |
-| `streamerbot://globals/persisted` | Persistent global variables |
-| `streamerbot://globals/temporary` | Session global variables |
-| `streamerbot://credits` | Credits roll data |
-| `streamerbot://events` | All subscribable events |
-| `streamerbot://event-buffer` | Last 200 received events |
-| `streamerbot://code-triggers` | Custom code triggers |
-| `streamerbot://connection` | Connection status and config |
-
----
-
-## Event Categories
-
-All 44+ Streamer.bot event categories are supported:
-
-`Application`, `Command`, `CrowdControl`, `Custom`, `DonorDrive`, `Elgato`, `FileTail`, `FileWatcher`, `Fourthwall`, `General`, `Group`, `HypeRate`, `Inputs`, `Kick`, `KoFi`, `MeldStudio`, `MIDI`, `Misc`, `OBS`, `Pallygg`, `Patreon`, `Pulsoid`, `Quote`, `Raw`, `Shopify`, `SpeakerBot`, `SpeechToText`, `StreamDeck`, `StreamElements`, `StreamLoots`, `Streamerbot`, `StreamerbotRemote`, `Streamlabs`, `StreamlabsDesktop`, `System`, `TipeeStream`, `TITS`, `TreatStream`, `Twitch`, `Voicemod`, `VTubeStudio`, `WebsocketClient`, `WebsocketCustomServer`, `YouTube`
+- [WebSocket requests](https://docs.streamer.bot/api/websocket/requests)
+- [HTTP DoAction](https://docs.streamer.bot/api/http/requests/do-action)
+- [Actions guide](https://docs.streamer.bot/guide/actions)
+- [Import & export](https://docs.streamer.bot/guide/import-export)

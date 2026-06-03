@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "streamerbot": {
+      "command": "node",
+      "args": ["G:/StreamerbotMCP/dist/index.js"],
+      "env": {
+        "STREAMERBOT_HOST": "127.0.0.1",
+        "STREAMERBOT_PORT": "8081",
+        "STREAMERBOT_HTTP_PORT": "7474",
+        "STREAMERBOT_PASSWORD": "",
+        "STREAMERBOT_DATA_PATH": "",
+        "STREAMERBOT_PRIMITIVES": "{\"overlay_show\":\"SE Overlay Show\",\"overlay_hide\":\"SE Overlay Hide\"}",
+        "STREAMERBOT_BRIDGE_SET_GLOBAL": "MCP Set Global"
+      }
+    }
+  }
+}
