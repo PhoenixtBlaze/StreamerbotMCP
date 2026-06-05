@@ -2,7 +2,7 @@
 
 An **agent-native** [MCP](https://modelcontextprotocol.io/) server for [Streamer.bot](https://streamer.bot/). Built for streamers who describe goals in plain language and let an AI agent configure, test, and run automations — without learning Streamer.bot internals.
 
-**v2 highlights:** compact action discovery, automation planning, live testing without restarts, C# script generation, scene/event helpers, bridge actions for globals, WebSocket auth, HTTP triggers.
+**v3 highlights:** token-efficient responses, structured agent guide, keyword-based automation planning, HTTP server discovery, universal secret redaction, safety confirmations, MCP prompts.
 
 ---
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Streamerbot MCP Server v2
+ * Streamerbot MCP Server v3
  * Agent-native control of Streamer.bot for streamers who use AI to run their bot.
  */
 
@@ -11,10 +11,15 @@ import { StreamerbotClient } from "./client";
 import { loadConfig } from "./config";
 import {
   findActions,
+  findActionExact,
   parseActionsList,
   summarizeGroups,
   summarizeEvents,
-  redactSecrets,
+  compactActions,
+  compactAction,
+  formatBroadcaster,
+  formatCommands,
+  formatGlobals,
 } from "./formatters";
 import {
   validateSetup,
@@ -25,20 +30,21 @@ import {
 } from "./automation";
 import { getActionDetail, loadActionsIndex } from "./actions-index";
 import { generateCSharp, listTemplates, type CSharpTemplateId } from "./csharp-templates";
-import { AGENT_INSTRUCTIONS, getUiWalkthrough } from "./instructions";
-import { ensureConnected, formatError, okText, errText, requireConfirm } from "./tool-helpers";
+import { AGENT_INSTRUCTIONS, getAgentGuideSection, getUiWalkthrough } from "./instructions";
+import { checkHttpServer } from "./http-status";
+import { ensureConnected, okText, errText, requireConfirm, catchErr } from "./tool-helpers";
 
 let client = new StreamerbotClient();
-const appConfig = () => client.getConfig();
+const cfg = () => client.getConfig();
 
 client.on("error", () => {});
 
 const server = new McpServer({
   name: "streamerbot-mcp",
-  version: "2.0.0",
+  version: "3.0.0",
   description:
     "Streamer automation copilot: control Streamer.bot live, plan scene/chat/alert workflows, generate C# scripts. " +
-    "Call validate_setup first. Users need not know Streamer.bot — describe goals in plain language.",
+    "Call validate_setup first.",
 });
 
 function tool<T extends Record<string, unknown>>(
@@ -50,79 +56,106 @@ function tool<T extends Record<string, unknown>>(
   server.tool(name, description, schema, handler as never);
 }
 
+const TEMPLATE_IDS = [
+  "set_global",
+  "get_global_and_log",
+  "obs_scene_router",
+  "chat_reply",
+  "custom_trigger",
+] as const;
+
 // ─── Guide & validation ─────────────────────────────────────────────────────
 
 tool(
   "get_agent_guide",
-  "Essential guide for AI agents helping streamers via Streamer.bot. Read this when starting any automation task.",
-  {},
-  async () => okText({ guide: AGENT_INSTRUCTIONS })
+  "Operating guide for Streamer.bot automation. Call once per session if unfamiliar with available patterns.",
+  {
+    section: z
+      .enum(["rules", "workflows", "cheatsheet", "limits"])
+      .optional()
+      .describe("Return only this section to save tokens"),
+  },
+  async ({ section }) => okText(getAgentGuideSection(section), cfg())
 );
 
 tool(
   "validate_setup",
-  "Check WebSocket connection, actions, primitives, bridge actions, and subscriptions. Run at the start of every session.",
+  "Full session health check: connection, HTTP server, actions, primitives, bridge action, subscriptions. Run first every session.",
   {},
   async () => {
     try {
-      const result = await validateSetup(client, appConfig());
-      return okText(result);
+      return okText(await validateSetup(client, cfg()), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_ui_walkthrough",
-  "Step-by-step Streamer.bot UI instructions for non-technical users. Topics: create_action, add_obs_source_visibility, add_obs_scene_trigger, add_set_global_bridge, import_extension, enable_websocket, enable_http.",
+  "Step-by-step Streamer.bot UI instructions for one topic. Valid topics are listed in the topic parameter schema.",
   {
     topic: z
       .string()
       .describe(
-        "Walkthrough topic: create_action | add_obs_source_visibility | add_obs_scene_trigger | add_set_global_bridge | import_extension | enable_websocket | enable_http"
+        "create_action | add_obs_source_visibility | add_obs_scene_trigger | add_set_global_bridge | import_extension | enable_websocket | enable_http"
       ),
   },
-  async ({ topic }) => okText({ topic, steps: getUiWalkthrough(topic) })
+  async ({ topic }) => {
+    const walk = getUiWalkthrough(topic);
+    return okText({ topic, ...walk }, cfg());
+  }
 );
 
 tool(
   "get_bridge_setup_guide",
-  "How to create one-time 'bridge' actions so MCP can set global variables (Streamer.bot has no SetGlobal WebSocket API).",
+  "How to create bridge actions for set_global_via_action. Streamer.bot has no SetGlobal WS API — these one-time actions are required.",
   {},
-  async () => okText(getBridgeSetupGuide(appConfig()))
+  async () => okText(getBridgeSetupGuide(cfg()), cfg())
 );
 
 tool(
   "get_import_checklist",
-  "Checklist for importing Streamer.bot extensions via UI (applies live, no restart).",
+  "Checklist for importing Streamer.bot extensions via UI. Pass goal to get context-relevant tips.",
   {
     goal: z.string().optional().describe("What the user is trying to achieve"),
   },
   async ({ goal }) =>
-    okText({
-      goal: goal ?? "general setup",
-      steps: getImportChecklist(goal ?? "automation"),
-    })
+    okText({ steps: getImportChecklist(goal ?? "automation") }, cfg())
+);
+
+tool(
+  "get_http_status",
+  "Check if Streamer.bot HTTP server is running. Required before do_action_http. Also returned by validate_setup.",
+  {},
+  async () => {
+    const c = cfg();
+    const status = await checkHttpServer(c.host, c.httpPort);
+    return okText(status, cfg());
+  }
 );
 
 // ─── Connection ─────────────────────────────────────────────────────────────
 
 tool(
   "get_connection_status",
-  "Current MCP ↔ Streamer.bot connection state, ports, primitives, and last OBS scene.",
+  "Current WS + HTTP connection state and last OBS scene. Prefer validate_setup for full session context.",
   {},
-  async () => okText(client.getConnectionInfo())
+  async () => {
+    const c = cfg();
+    const http = await checkHttpServer(c.host, c.httpPort);
+    return okText({ ...client.getConnectionInfo(), http_available: http.available }, cfg());
+  }
 );
 
 tool(
   "connect",
-  "Connect or reconnect to Streamer.bot WebSocket server.",
+  "Connect/reconnect to Streamer.bot WS server. Call only if validate_setup reports disconnected.",
   {
     host: z.string().optional(),
-    port: z.number().int().optional(),
+    port: z.number().int().optional().describe("WebSocket port (default from env)"),
     password: z.string().optional(),
-    http_port: z.number().int().optional(),
+    http_port: z.number().int().optional().describe("HTTP port for do_action_http (default 7474)"),
   },
   async ({ host, port, password, http_port }) => {
     try {
@@ -137,84 +170,96 @@ tool(
       client.on("error", () => {});
       await client.connect();
       await client.subscribeToAll();
-      return okText({
-        message: `Connected to ${client.getConnectionInfo().host}:${client.getConnectionInfo().wsPort}`,
-        info: client.getConnectionInfo(),
-      });
+      const c = client.getConfig();
+      const http = await checkHttpServer(c.host, c.httpPort);
+      return okText(
+        {
+          connected: true,
+          host: c.host,
+          wsPort: c.wsPort,
+          httpPort: c.httpPort,
+          http_available: http.available,
+        },
+        cfg()
+      );
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
-tool("disconnect", "Disconnect from Streamer.bot.", {}, async () => {
-  client.disconnect();
-  return okText({ message: "Disconnected." });
-});
+tool(
+  "disconnect",
+  "Disconnect MCP from Streamer.bot WS. Only needed to switch hosts or close session gracefully.",
+  {},
+  async () => okText({ disconnected: true }, cfg())
+);
 
 tool(
   "get_info",
-  "Streamer.bot version, OS, uptime.",
+  "Streamer.bot version, OS, uptime. Use only when version matters; validate_setup includes this.",
   {},
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.getInfo());
+      return okText(await client.getInfo(), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_broadcaster",
-  "Connected broadcaster accounts (Twitch, YouTube, Kick).",
+  "Connected broadcaster accounts (Twitch/YouTube/Kick). Streamer.bot must be connected to a platform first.",
   {},
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.getBroadcaster());
+      const raw = (await client.getBroadcaster()) as Record<string, unknown>;
+      return okText(formatBroadcaster(raw), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_active_viewers",
-  "Active viewers on connected platforms.",
+  "Active viewers on connected platforms. Returns empty if no active stream or no platform connected.",
   {},
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.getActiveViewers());
+      const res = await client.getActiveViewers();
+      return okText(res, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
-// ─── Actions discovery (compact) ────────────────────────────────────────────
+// ─── Actions discovery ──────────────────────────────────────────────────────
 
 tool(
   "list_action_groups",
-  "Compact summary of action groups (name, total, enabled, disabled). Use instead of get_actions for planning.",
+  "Compact group summary (name, total, enabled, disabled). Always start here before listing individual actions.",
   {},
   async () => {
     try {
       await ensureConnected(client);
       const res = await client.getActions();
       const actions = parseActionsList(res as Record<string, unknown>);
-      return okText({ count: actions.length, groups: summarizeGroups(actions) });
+      return okText({ count: actions.length, groups: summarizeGroups(actions) }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "list_actions_in_group",
-  "List actions in one group (id, name, enabled, trigger/subaction counts).",
+  "All actions in one group. Use after list_action_groups to drill into a specific group.",
   {
     group: z.string().describe("Exact group name, e.g. Background"),
     include_disabled: z.boolean().default(true),
@@ -227,16 +272,16 @@ tool(
         (a) => a.group.toLowerCase() === group.toLowerCase()
       );
       if (!include_disabled) actions = actions.filter((a) => a.enabled);
-      return okText({ group, count: actions.length, actions });
+      return okText({ group, count: actions.length, actions: compactActions(actions) }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "find_actions",
-  "Search actions by keyword in name or group.",
+  "Search actions by keyword. Returns id, name, group, enabled. Call before do_action to confirm action exists.",
   {
     query: z.string(),
     group: z.string().optional(),
@@ -246,26 +291,44 @@ tool(
     try {
       await ensureConnected(client);
       const res = await client.getActions();
-      const actions = findActions(parseActionsList(res as Record<string, unknown>), query, group).slice(
-        0,
-        limit
+      const actions = compactActions(
+        findActions(parseActionsList(res as Record<string, unknown>), query, group).slice(0, limit)
       );
-      return okText({ query, count: actions.length, actions });
+      return okText({ count: actions.length, actions }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
+    }
+  }
+);
+
+tool(
+  "check_action_exists",
+  "Quickly check if an action name exists. Returns {found, id?}. Use before do_action in automations.",
+  {
+    name: z.string().describe("Exact or case-insensitive action name"),
+  },
+  async ({ name }) => {
+    try {
+      await ensureConnected(client);
+      const res = await client.getActions();
+      const actions = parseActionsList(res as Record<string, unknown>);
+      const found = findActionExact(actions, name);
+      return okText(found ? { found: true, id: found.id, name: found.name } : { found: false }, cfg());
+    } catch (e) {
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_action_detail",
-  "Action metadata from live API; optional sub-action detail from actions.json if STREAMERBOT_DATA_PATH set and Streamer.bot stopped.",
+  "Live metadata for one action. from_disk=true reads actions.json — only safe when Streamer.bot is stopped.",
   {
     action_id_or_name: z.string(),
     from_disk: z
       .boolean()
       .default(false)
-      .describe("If true and data path set, include sub-action summary from actions.json (read-only)"),
+      .describe("WARNING: disk data is stale if Streamer.bot is running. Only use when SB is fully stopped."),
   },
   async ({ action_id_or_name, from_disk }) => {
     try {
@@ -276,88 +339,111 @@ tool(
       const live =
         actions.find((a) => a.id === action_id_or_name) ??
         actions.find((a) => a.name.toLowerCase() === q);
-      if (!live) return errText(`Action not found: ${action_id_or_name}`);
-
-      const out: Record<string, unknown> = { live };
-      const dataPath = appConfig().dataPath;
-      if (from_disk && dataPath) {
-        const disk = getActionDetail(dataPath, action_id_or_name);
-        out.disk = disk;
-        out.diskWarning =
-          "Disk index is stale if Streamer.bot is running. Prefer UI edits + do_action for testing.";
+      if (!live) {
+        return errText({
+          error: `Action not found: ${action_id_or_name}`,
+          fix: "Run find_actions with a keyword to locate it",
+          code: "ACTION_NOT_FOUND",
+        });
       }
-      return okText(out);
+
+      const out: Record<string, unknown> = { live: compactAction(live) };
+      const dataPath = cfg().dataPath;
+      if (from_disk && dataPath) {
+        out.disk = getActionDetail(dataPath, action_id_or_name);
+      }
+      return okText(out, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_actions",
-  "Full action list from Streamer.bot (large). Prefer list_action_groups / find_actions unless you need everything.",
+  "Full action list. LARGE — prefer list_action_groups or find_actions unless you need all IDs at once.",
   {
-    verbose: z.boolean().default(false).describe("If false, returns compact list only"),
+    verbose: z.boolean().default(false).describe("If true, returns full API response with subaction counts"),
   },
   async ({ verbose }) => {
     try {
       await ensureConnected(client);
       const res = await client.getActions();
       if (!verbose) {
-        const actions = parseActionsList(res as Record<string, unknown>);
-        return okText({ count: actions.length, actions });
+        const actions = compactActions(parseActionsList(res as Record<string, unknown>));
+        return okText({ count: actions.length, actions }, cfg());
       }
-      return okText(res);
+      return okText(res, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "do_action",
-  "Run a Streamer.bot action by id or name. Primary way to test automations live (no restart).",
+  "Run an action by id or name. For result verification with event watching, use test_action instead.",
   {
     action_id: z.string().optional(),
     action_name: z.string().optional(),
     args: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
   },
   async ({ action_id, action_name, args }) => {
-    if (!action_id && !action_name) return errText("Provide action_id or action_name.");
+    if (!action_id && !action_name) {
+      return errText({
+        error: "Provide action_id or action_name",
+        fix: "Run find_actions or check_action_exists first",
+        code: "ACTION_NOT_FOUND",
+      });
+    }
     try {
       await ensureConnected(client);
       const id = action_id ?? action_name!;
-      const res = await client.doAction(id, args as Record<string, unknown>, !!action_id);
-      return okText(res);
+      await client.doAction(id, args as Record<string, unknown>, !!action_id);
+      return okText({ executed: true }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "do_action_http",
-  "Trigger action via HTTP server (port 7474 default). Fire-and-forget; no WebSocket needed.",
+  "Fire-and-forget action via HTTP (port 7474). Faster than WS; no response. Requires HTTP server enabled.",
   {
     action_id: z.string().optional(),
     action_name: z.string().optional(),
     args: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
   },
   async ({ action_id, action_name, args }) => {
-    if (!action_id && !action_name) return errText("Provide action_id or action_name.");
+    if (!action_id && !action_name) {
+      return errText({
+        error: "Provide action_id or action_name",
+        fix: "Run find_actions first",
+        code: "ACTION_NOT_FOUND",
+      });
+    }
     try {
+      const http = await checkHttpServer(cfg().host, cfg().httpPort);
+      if (!http.available) {
+        return errText({
+          error: "HTTP server not reachable",
+          fix: "Enable HTTP Server in Streamer.bot Servers/Clients, then validate_setup",
+          code: "HTTP_UNAVAILABLE",
+        });
+      }
       const id = action_id ?? action_name!;
-      const res = await client.doActionHttp(id, args as Record<string, unknown>, !!action_id);
-      return okText(res);
+      await client.doActionHttp(id, args as Record<string, unknown>, !!action_id);
+      return okText({ sent: true }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "test_action",
-  "Run an action and optionally report recent events (for verifying scene/chat automations).",
+  "Run action and watch for resulting events. Use instead of do_action when you need to verify the automation worked.",
   {
     action_id: z.string().optional(),
     action_name: z.string().optional(),
@@ -365,48 +451,56 @@ tool(
     watch_events_seconds: z.number().int().min(0).max(30).default(3),
   },
   async ({ action_id, action_name, args, watch_events_seconds }) => {
-    if (!action_id && !action_name) return errText("Provide action_id or action_name.");
+    if (!action_id && !action_name) {
+      return errText({
+        error: "Provide action_id or action_name",
+        fix: "Run find_actions first",
+        code: "ACTION_NOT_FOUND",
+      });
+    }
     try {
       await ensureConnected(client);
-      const before = client.getBufferedEvents(5);
       const id = action_id ?? action_name!;
-      const result = await client.doAction(id, args as Record<string, unknown>, !!action_id);
+      await client.doAction(id, args as Record<string, unknown>, !!action_id);
       if (watch_events_seconds > 0) {
         await new Promise((r) => setTimeout(r, watch_events_seconds * 1000));
       }
       const after = client.getBufferedEvents(20);
-      return okText({
-        doAction: result,
-        eventsBefore: before.length,
-        recentEvents: summarizeEvents(after),
-        currentScene: client.getLastScene(),
-      });
+      return okText(
+        {
+          events: summarizeEvents(after),
+          currentScene: client.getLastScene()?.name ?? null,
+        },
+        cfg()
+      );
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "trigger_primitive",
-  "Run a configured primitive action (overlay_show, overlay_hide, etc.). Set STREAMERBOT_PRIMITIVES in env.",
+  "Run a configured primitive action (overlay_show, overlay_hide, etc.). View available primitives in validate_setup output.",
   {
     primitive: z.string().describe("Key from primitives config, e.g. overlay_show, overlay_hide"),
     args: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
   },
   async ({ primitive, args }) => {
-    const name = appConfig().primitives[primitive];
+    const name = cfg().primitives[primitive];
     if (!name) {
-      return errText(
-        `Unknown primitive '${primitive}'. Available: ${Object.keys(appConfig().primitives).join(", ")}`
-      );
+      return errText({
+        error: `Unknown primitive '${primitive}'`,
+        fix: "Check validate_setup primitives or set STREAMERBOT_PRIMITIVES",
+        code: "ACTION_NOT_FOUND",
+      });
     }
     try {
       await ensureConnected(client);
-      const res = await client.doAction(name, args as Record<string, unknown>, false);
-      return okText({ primitive, action: name, result: res });
+      await client.doAction(name, args as Record<string, unknown>, false);
+      return okText({ primitive, action: name, executed: true }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -415,18 +509,18 @@ tool(
 
 tool(
   "describe_automation",
-  "Given a goal in plain English, suggest pattern, matching existing actions, and step-by-step plan (UI + MCP).",
+  "Describe a streaming goal in plain English → get pattern, matching actions, and step-by-step plan.",
   {
-    goal: z.string().describe("What the streamer wants, e.g. 'show SE overlay only in ingame scene'"),
+    goal: z.string().describe("e.g. 'show SE overlay only in ingame scene'"),
   },
   async ({ goal }) => {
     try {
       await ensureConnected(client);
       const res = await client.getActions();
       const actions = parseActionsList(res as Record<string, unknown>);
-      return okText(describeAutomationGoal(goal, actions));
+      return okText(describeAutomationGoal(goal, actions), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -435,7 +529,7 @@ tool(
 
 tool(
   "set_global_via_action",
-  "Set a global variable by running bridge action (create 'MCP Set Global' first — see get_bridge_setup_guide).",
+  "Set a global variable via bridge action. Bridge action must exist first — see get_bridge_setup_guide.",
   {
     name: z.string().describe("Global variable name"),
     value: z.union([z.string(), z.number(), z.boolean()]),
@@ -444,39 +538,49 @@ tool(
   async ({ name, value, persisted }) => {
     try {
       await ensureConnected(client);
-      const actionName = appConfig().bridgeActions.setGlobal;
-      const res = await client.doAction(
+      const config = cfg();
+      const actionName = config.bridgeActions.setGlobal;
+      const actionsRes = await client.getActions();
+      const actions = parseActionsList(actionsRes as Record<string, unknown>);
+      if (!actions.some((a) => a.name === actionName)) {
+        return errText({
+          error: `Bridge action "${actionName}" not found`,
+          fix: "Call get_bridge_setup_guide and create the action in Streamer.bot UI first.",
+          code: "BRIDGE_NOT_FOUND",
+        });
+      }
+      await client.doAction(
         actionName,
         { name, value: String(value), persisted: String(persisted) },
         false
       );
-      return okText({ action: actionName, variable: name, result: res });
+      return okText({ variable: name, set: true }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_globals",
-  "All global variables. Secrets are redacted.",
+  "All global variables (secrets redacted). Returns persisted or session globals.",
   {
     persisted: z.boolean().default(true),
   },
   async ({ persisted }) => {
     try {
       await ensureConnected(client);
-      const res = await client.getGlobals(persisted);
-      return okText(redactSecrets(res, appConfig()));
+      const res = (await client.getGlobals(persisted)) as Record<string, unknown>;
+      return okText(formatGlobals(res), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_global",
-  "Single global variable (redacted if sensitive).",
+  "One global variable by name (secret-safe). Returns null with hint if variable doesn't exist.",
   {
     variable: z.string(),
     persisted: z.boolean().default(true),
@@ -484,10 +588,20 @@ tool(
   async ({ variable, persisted }) => {
     try {
       await ensureConnected(client);
-      const res = await client.getGlobal(variable, persisted);
-      return okText(redactSecrets(res, appConfig()));
+      const res = (await client.getGlobal(variable, persisted)) as Record<string, unknown>;
+      const val = res.value ?? res.global ?? res;
+      if (val === null || val === undefined || (res.status === "error" && !val)) {
+        return okText(
+          {
+            value: null,
+            hint: "Variable not set. Use set_global_via_action to create it.",
+          },
+          cfg()
+        );
+      }
+      return okText({ name: variable, value: val }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -496,21 +610,43 @@ tool(
 
 tool(
   "get_events",
-  "All subscribable event categories and types.",
+  "All subscribable event categories and types (large). Prefer list_event_categories for compact list.",
   {},
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.getEvents());
+      return okText(await client.getEvents(), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
+    }
+  }
+);
+
+tool(
+  "list_event_categories",
+  "All subscribable event categories from Streamer.bot. Use to build custom subscribe_to_events calls.",
+  {
+    verbose: z.boolean().default(false).describe("If true, include nested event types per category"),
+  },
+  async ({ verbose }) => {
+    try {
+      await ensureConnected(client);
+      const res = await client.getEvents();
+      const events = (res.events as Record<string, string[]>) ?? {};
+      if (verbose) {
+        return okText({ categories: events, total: Object.keys(events).length }, cfg());
+      }
+      const categories = Object.keys(events);
+      return okText({ categories, total: categories.length }, cfg());
+    } catch (e) {
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "subscribe_preset",
-  "Subscribe to a preset event bundle: streaming, alerts, obs, chat, or all.",
+  "Subscribe to a named event bundle: streaming|alerts|obs|chat|all. Call before get_recent_events.",
   {
     preset: z.enum(["streaming", "alerts", "obs", "chat", "all"]),
   },
@@ -522,10 +658,10 @@ tool(
         preset,
         (eventsRes.events as Record<string, string[]>) ?? null
       );
-      const res = await client.subscribeToEvents(events);
-      return okText({ preset, subscribed: Object.keys(events), result: res });
+      await client.subscribeToEvents(events);
+      return okText({ preset, categories: Object.keys(events) }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -539,23 +675,30 @@ tool(
   async ({ events }) => {
     try {
       await ensureConnected(client);
-      return okText(await client.subscribeToEvents(events));
+      await client.subscribeToEvents(events);
+      return okText({ categories: Object.keys(events) }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "subscribe_to_all_events",
-  "Subscribe to every event category (dynamic list from Streamer.bot).",
+  "Subscribe to every event category. Adds load to buffer — use subscribe_preset for specific workflows.",
   {},
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.subscribeToAll());
+      await client.subscribeToAll();
+      const count = Object.keys(client.getSubscribedEvents()).length;
+      const warning =
+        count > 15
+          ? "High event volume subscribed. Consider subscribe_preset for targeted monitoring."
+          : null;
+      return okText({ categories_subscribed: count, warning }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -567,16 +710,17 @@ tool(
   async ({ events }) => {
     try {
       await ensureConnected(client);
-      return okText(await client.unsubscribeFromEvents(events));
+      await client.unsubscribeFromEvents(events);
+      return okText({ unsubscribed: Object.keys(events) }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "get_recent_events",
-  "Events from MCP buffer (subscribe first).",
+  "Events from buffer. Call subscribe_preset first if empty. Filter by source or type to reduce output.",
   {
     limit: z.number().int().min(1).max(500).default(50),
     source: z.string().optional(),
@@ -584,15 +728,22 @@ tool(
   },
   async ({ limit, source, type }) => {
     const events = client.getBufferedEvents(limit, source, type);
-    return okText(
-      events.length ? events : { message: "No events. Run subscribe_preset or subscribe_to_all_events." }
-    );
+    if (!events.length) {
+      return okText(
+        {
+          events: [],
+          hint: "No events — run subscribe_preset or subscribe_to_all_events first.",
+        },
+        cfg()
+      );
+    }
+    return okText({ count: events.length, events }, cfg());
   }
 );
 
 tool(
   "summarize_recent_events",
-  "Compact summary of buffered events by source/type.",
+  "Compact event count by source/type. Prefer this over get_recent_events for planning; use get_recent_events for debugging.",
   {
     limit: z.number().int().min(1).max(500).default(100),
     source: z.string().optional(),
@@ -600,13 +751,13 @@ tool(
   },
   async ({ limit, source, type }) => {
     const events = client.getBufferedEvents(limit, source, type);
-    return okText(summarizeEvents(events));
+    return okText(summarizeEvents(events), cfg());
   }
 );
 
 tool(
   "wait_for_event",
-  "Wait up to timeout_ms for an event matching source/type (subscribe first).",
+  "Wait up to timeout_ms for an event matching source/type. Subscribe to events first.",
   {
     source: z.string().optional().describe("e.g. Obs, Twitch"),
     type: z.string().optional().describe("e.g. SceneChanged, ChatMessage"),
@@ -615,54 +766,74 @@ tool(
   async ({ source, type, timeout_ms }) => {
     await ensureConnected(client).catch(() => {});
     const ev = await client.waitForEvent({ source, type, timeoutMs: timeout_ms });
-    return okText(ev ?? { message: "No matching event within timeout." });
+    if (!ev) {
+      return okText(
+        {
+          event: null,
+          hint: "No matching event — ensure subscribe_preset ran and trigger the event in Streamer.bot/OBS",
+        },
+        cfg()
+      );
+    }
+    return okText({ source: ev.source, type: ev.type, timestamp: ev.timestamp }, cfg());
   }
 );
 
 tool(
   "get_current_scene",
-  "Last OBS scene from Obs.SceneChanged buffer, or hint to switch scene / subscribe obs preset.",
+  "Last OBS scene from buffer. Subscribe obs preset and change scene in OBS if null.",
   {},
   async () => {
     const scene = client.getLastScene();
-    return okText({
-      scene: scene?.name ?? null,
-      timestamp: scene?.timestamp ?? null,
-      hint: scene
-        ? null
-        : "Subscribe subscribe_preset obs, change OBS scene, or wait_for_event source=Obs type=SceneChanged",
-    });
+    if (!scene?.name) {
+      return okText(
+        {
+          scene: null,
+          hint: "Subscribe subscribe_preset obs, change OBS scene, or wait_for_event source=Obs type=SceneChanged",
+        },
+        cfg()
+      );
+    }
+    return okText({ scene: scene.name, timestamp: scene.timestamp }, cfg());
   }
 );
 
-tool("clear_event_buffer", "Clear MCP event buffer.", {}, async () => {
-  client.clearEventBuffer();
-  return okText({ cleared: true });
-});
-
-tool("get_subscribed_events", "Currently subscribed event categories.", {}, async () =>
-  okText(client.getSubscribedEvents())
+tool(
+  "clear_event_buffer",
+  "Clear all buffered events. Use before a test sequence to get a clean baseline.",
+  {},
+  async () => {
+    client.clearEventBuffer();
+    return okText({ cleared: true }, cfg());
+  }
 );
 
-// ─── Code triggers & C# ───────────────────────────────────────────────────────
+tool(
+  "get_subscribed_events",
+  "Currently subscribed event categories.",
+  {},
+  async () => okText(client.getSubscribedEvents(), cfg())
+);
+
+// ─── Code triggers & C# ─────────────────────────────────────────────────────
 
 tool(
   "get_code_triggers",
-  "Custom code triggers registered in Streamer.bot.",
+  "Custom code triggers registered in Streamer.bot. Returns name and id for use in execute_code_trigger.",
   {},
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.getCodeTriggers());
+      return okText(await client.getCodeTriggers(), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "execute_code_trigger",
-  "Fire a custom code trigger.",
+  "Fire a custom code trigger by name. Call get_code_triggers first to confirm it exists.",
   {
     trigger_name: z.string(),
     args: z.record(z.union([z.string(), z.number(), z.boolean()])).optional(),
@@ -670,31 +841,26 @@ tool(
   async ({ trigger_name, args }) => {
     try {
       await ensureConnected(client);
-      return okText(await client.executeCodeTrigger(trigger_name, args as Record<string, unknown>));
+      await client.executeCodeTrigger(trigger_name, args as Record<string, unknown>);
+      return okText({ triggered: trigger_name }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "list_csharp_templates",
-  "List C# script templates the agent can generate for the user to paste into Streamer.bot.",
+  "Available C# templates. Call this before generate_csharp_script to get valid template names.",
   {},
-  async () => okText({ templates: listTemplates() })
+  async () => okText({ templates: listTemplates().map((t) => t.id) }, cfg())
 );
 
 tool(
   "generate_csharp_script",
-  "Generate a C# Execute Code script + setup steps for Streamer.bot. User pastes into UI — no restart.",
+  "Generate C# sub-action script for Streamer.bot. Call list_csharp_templates first for valid template names.",
   {
-    template: z.enum([
-      "set_global",
-      "get_global_and_log",
-      "obs_scene_router",
-      "chat_reply",
-      "custom_trigger",
-    ]),
+    template: z.string(),
     variable_name: z.string().optional(),
     default_value: z.string().optional(),
     persisted: z.boolean().optional(),
@@ -705,36 +871,74 @@ tool(
     chat_message: z.string().optional(),
   },
   async (params) => {
-    const out = generateCSharp(params.template as CSharpTemplateId, {
-      variableName: params.variable_name,
-      defaultValue: params.default_value,
-      persisted: params.persisted,
-      sceneNames: params.scene_names,
-      overlayScene: params.overlay_scene,
-      overlaySource: params.overlay_source,
-      triggerName: params.trigger_name,
-      chatMessage: params.chat_message,
-    });
-    return okText(out);
+    if (!TEMPLATE_IDS.includes(params.template as (typeof TEMPLATE_IDS)[number])) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({
+              error: "Unknown template",
+              fix: "Call list_csharp_templates to see valid options",
+              code: "TEMPLATE_NOT_FOUND",
+              available: [...TEMPLATE_IDS],
+            }),
+          },
+        ],
+        isError: true,
+      };
+    }
+    try {
+      const out = generateCSharp(params.template as CSharpTemplateId, {
+        variableName: params.variable_name,
+        defaultValue: params.default_value,
+        persisted: params.persisted,
+        sceneNames: params.scene_names,
+        overlayScene: params.overlay_scene,
+        overlaySource: params.overlay_source,
+        triggerName: params.trigger_name,
+        chatMessage: params.chat_message,
+      });
+      return okText(out, cfg());
+    } catch (e) {
+      return catchErr(e);
+    }
   }
 );
 
 tool(
   "inspect_actions_from_disk",
-  "Read-only index of actions.json (STREAMERBOT_DATA_PATH). Only when Streamer.bot is stopped.",
+  "Read-only actions.json index. ONLY safe when Streamer.bot is fully stopped. Live data: use get_actions instead.",
   {
     group: z.string().optional(),
     limit: z.number().int().default(50),
+    force: z
+      .boolean()
+      .default(false)
+      .describe("Set true to read disk while Streamer.bot is connected (data may be stale)"),
   },
-  async ({ group, limit }) => {
-    const dataPath = appConfig().dataPath;
+  async ({ group, limit, force }) => {
+    const dataPath = cfg().dataPath;
     if (!dataPath) {
-      return errText("Set STREAMERBOT_DATA_PATH to Streamer.bot/data folder for disk index.");
+      return errText({
+        error: "STREAMERBOT_DATA_PATH not set",
+        fix: "Set env var to Streamer.bot/data folder for disk index",
+        code: "UNKNOWN",
+      });
+    }
+    if (client.isConnected && !force) {
+      return okText(
+        {
+          data: null,
+          warning:
+            "Streamer.bot appears to be running. Disk data may be stale. Proceed with force=true only if you have stopped SB.",
+        },
+        cfg()
+      );
     }
     const { actions, warning } = loadActionsIndex(dataPath);
     let list = actions;
     if (group) list = list.filter((a) => a.group.toLowerCase() === group.toLowerCase());
-    return okText({ warning, count: list.length, actions: list.slice(0, limit) });
+    return okText({ warning, count: list.length, actions: list.slice(0, limit) }, cfg());
   }
 );
 
@@ -742,14 +946,15 @@ tool(
 
 tool(
   "get_commands",
-  "Chat commands defined in Streamer.bot.",
+  "Chat commands defined in Streamer.bot. Returns command word, action linked, and enabled status.",
   {},
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.getCommands());
+      const raw = (await client.getCommands()) as Record<string, unknown>;
+      return okText(formatCommands(raw), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -761,9 +966,9 @@ tool(
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.getCredits());
+      return okText(await client.getCredits(), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -775,16 +980,16 @@ tool(
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.testCredits());
+      return okText(await client.testCredits(), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "clear_credits",
-  "Clear all credits. Requires confirm=true.",
+  "Wipe all end-of-stream credits. IRREVERSIBLE — requires confirm=true.",
   {
     confirm: z.boolean().default(false),
   },
@@ -793,16 +998,17 @@ tool(
     if (block) return errText(block);
     try {
       await ensureConnected(client);
-      return okText(await client.clearCredits());
+      await client.clearCredits();
+      return okText({ cleared: true }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "send_message",
-  "Send chat message on Twitch, Kick, or YouTube. Requires confirm=true.",
+  "Send chat message to Twitch/Kick/YouTube. REQUIRES confirm=true — message goes live to public chat.",
   {
     message: z.string().min(1),
     platform: z.enum(["twitch", "kick", "youtube"]),
@@ -815,9 +1021,10 @@ tool(
     if (block) return errText(block);
     try {
       await ensureConnected(client);
-      return okText(await client.sendMessage(message, platform, bot, internal));
+      await client.sendMessage(message, platform, bot, internal);
+      return okText({ sent: true, platform }, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -834,9 +1041,9 @@ tool(
   async ({ variable, persisted }) => {
     try {
       await ensureConnected(client);
-      return okText(redactSecrets(await client.twitchGetUserGlobals(variable, persisted), appConfig()));
+      return okText(await client.twitchGetUserGlobals(variable, persisted), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -852,11 +1059,9 @@ tool(
   async ({ user_id, persisted, variable }) => {
     try {
       await ensureConnected(client);
-      return okText(
-        redactSecrets(await client.twitchGetUserGlobal(user_id, persisted, variable), appConfig())
-      );
+      return okText(await client.twitchGetUserGlobal(user_id, persisted, variable), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -868,9 +1073,9 @@ tool(
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.twitchGetEmotes());
+      return okText(await client.twitchGetEmotes(), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -882,9 +1087,9 @@ tool(
   async () => {
     try {
       await ensureConnected(client);
-      return okText(await client.youtubeGetEmotes());
+      return okText(await client.youtubeGetEmotes(), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
@@ -899,16 +1104,16 @@ tool(
   async ({ user_login, platform }) => {
     try {
       await ensureConnected(client);
-      return okText(await client.getUserPronouns(user_login, platform));
+      return okText(await client.getUserPronouns(user_login, platform), cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
 tool(
   "raw_request",
-  "Send arbitrary WebSocket request (advanced).",
+  "Send arbitrary WS request (advanced). Use only when no specific tool covers your need. See Streamer.bot WS API docs.",
   {
     request: z.string(),
     params: z.record(z.unknown()).optional(),
@@ -917,42 +1122,97 @@ tool(
     try {
       await ensureConnected(client);
       const res = await client.sendRequest({ request: req, ...(params ?? {}) } as never);
-      return okText(redactSecrets(res, appConfig()));
+      return okText(res, cfg());
     } catch (e) {
-      return errText(formatError(e));
+      return catchErr(e);
     }
   }
 );
 
+// ─── MCP Prompts ─────────────────────────────────────────────────────────────
+
+server.prompt(
+  "scene_overlay_router",
+  "Set up an overlay (source) to show only in a specific OBS scene.",
+  async () => ({
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: [
+            "Workflow: scene overlay router",
+            "1. validate_setup",
+            "2. describe_automation with the user's scene/overlay goal",
+            "3. get_ui_walkthrough add_obs_source_visibility",
+            "4. get_ui_walkthrough add_obs_scene_trigger",
+            "5. trigger_primitive overlay_show or overlay_hide to test",
+            "6. test_action + subscribe_preset obs + get_current_scene to verify",
+          ].join("\n"),
+        },
+      },
+    ],
+  })
+);
+
+server.prompt(
+  "alert_chain_setup",
+  "Configure alert actions for follows/subs/cheers.",
+  async () => ({
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: [
+            "Workflow: alert chain",
+            "1. validate_setup",
+            "2. describe_automation with alert types needed",
+            "3. subscribe_preset alerts",
+            "4. wait_for_event or test_action to verify",
+          ].join("\n"),
+        },
+      },
+    ],
+  })
+);
+
+server.prompt(
+  "chat_command_setup",
+  "Add a chat command that triggers a Streamer.bot action.",
+  async () => ({
+    messages: [
+      {
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: [
+            "Workflow: chat command",
+            "1. get_commands to see existing commands",
+            "2. describe_automation with command goal",
+            "3. get_ui_walkthrough create_action if new action needed",
+            "4. test_action on the linked action",
+          ].join("\n"),
+        },
+      },
+    ],
+  })
+);
+
 // ─── Resources ───────────────────────────────────────────────────────────────
 
-async function resourceJson(uri: string, fetcher: () => Promise<unknown>): Promise<{
-  contents: { uri: string; mimeType: string; text: string }[];
-}> {
-  try {
-    await ensureConnected(client);
-    const data = await fetcher();
-    return {
-      contents: [{ uri, mimeType: "application/json", text: JSON.stringify(data, null, 2) }],
-    };
-  } catch (e) {
-    return {
-      contents: [{ uri, mimeType: "text/plain", text: `Error: ${formatError(e)}` }],
-    };
-  }
-}
-
 server.resource("streamerbot-agent-guide", "streamerbot://agent-guide", {
-  description: "Agent operating guide for streamer automation",
-  mimeType: "text/markdown",
-}, async () => ({
-  contents: [{ uri: "streamerbot://agent-guide", mimeType: "text/markdown", text: AGENT_INSTRUCTIONS }],
-}));
-
-server.resource("streamerbot-info", "streamerbot://info", {
-  description: "Instance info",
+  description: "Structured agent operating guide (section-addressable via get_agent_guide)",
   mimeType: "application/json",
-}, () => resourceJson("streamerbot://info", () => client.getInfo()));
+}, async () => ({
+  contents: [
+    {
+      uri: "streamerbot://agent-guide",
+      mimeType: "application/json",
+      text: JSON.stringify(AGENT_INSTRUCTIONS),
+    },
+  ],
+}));
 
 server.resource("streamerbot-actions-summary", "streamerbot://actions-summary", {
   description: "Compact action groups summary",
@@ -967,29 +1227,56 @@ server.resource("streamerbot-actions-summary", "streamerbot://actions-summary", 
         {
           uri: "streamerbot://actions-summary",
           mimeType: "application/json",
-          text: JSON.stringify({ count: actions.length, groups: summarizeGroups(actions) }, null, 2),
+          text: JSON.stringify(
+            {
+              count: actions.length,
+              groups: summarizeGroups(actions),
+              last_updated: new Date().toISOString(),
+            },
+            null,
+            2
+          ),
         },
       ],
     };
   } catch (e) {
+    const c = catchErr(e);
     return {
-      contents: [{ uri: "streamerbot://actions-summary", mimeType: "text/plain", text: formatError(e) }],
+      contents: [
+        {
+          uri: "streamerbot://actions-summary",
+          mimeType: "application/json",
+          text: c.content[0].text,
+        },
+      ],
     };
   }
 });
 
 server.resource("streamerbot-connection", "streamerbot://connection", {
-  description: "Connection status",
+  description: "Connection status with HTTP availability",
   mimeType: "application/json",
-}, async () => ({
-  contents: [
-    {
-      uri: "streamerbot://connection",
-      mimeType: "application/json",
-      text: JSON.stringify(client.getConnectionInfo(), null, 2),
-    },
-  ],
-}));
+}, async () => {
+  const c = cfg();
+  const http = await checkHttpServer(c.host, c.httpPort);
+  return {
+    contents: [
+      {
+        uri: "streamerbot://connection",
+        mimeType: "application/json",
+        text: JSON.stringify(
+          {
+            ...client.getConnectionInfo(),
+            http_available: http.available,
+            subscribed_categories: Object.keys(client.getSubscribedEvents()),
+          },
+          null,
+          2
+        ),
+      },
+    ],
+  };
+});
 
 server.resource("streamerbot-event-buffer", "streamerbot://event-buffer", {
   description: "Recent events summary",
@@ -1003,6 +1290,23 @@ server.resource("streamerbot-event-buffer", "streamerbot://event-buffer", {
     },
   ],
 }));
+
+server.resource("streamerbot-http-status", "streamerbot://http-status", {
+  description: "HTTP server availability and latency",
+  mimeType: "application/json",
+}, async () => {
+  const c = cfg();
+  const status = await checkHttpServer(c.host, c.httpPort);
+  return {
+    contents: [
+      {
+        uri: "streamerbot://http-status",
+        mimeType: "application/json",
+        text: JSON.stringify(status, null, 2),
+      },
+    ],
+  };
+});
 
 // ─── Start ───────────────────────────────────────────────────────────────────
 

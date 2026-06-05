@@ -1,6 +1,6 @@
 {
   "name": "streamerbot-mcp",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Agent-native MCP server for Streamer.bot — plan, test, and run stream automations without restarting the bot",
   "main": "dist/index.js",
   "scripts": {

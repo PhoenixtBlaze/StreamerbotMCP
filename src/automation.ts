@@ -1,9 +1,12 @@
 import type { StreamerbotClient } from "./client";
 import type { AppConfig } from "./config";
 import { EVENT_PRESETS } from "./config";
+import { checkHttpServer } from "./http-status";
 import {
+  compactActions,
   findActions,
   parseActionsList,
+  scoreTextMatch,
   summarizeGroups,
   type ActionSummary,
 } from "./formatters";
@@ -11,8 +14,183 @@ import {
 export interface ValidationResult {
   ok: boolean;
   connected: boolean;
+  http_available: boolean;
+  recommended_next: string;
   checks: Array<{ name: string; pass: boolean; message: string }>;
   hints: string[];
+}
+
+const PATTERNS: Record<string, Array<{ keywords: string[]; weight: number }>> = {
+  scene_router: [
+    { keywords: ["scene", "obs"], weight: 2 },
+    { keywords: ["overlay", "show", "hide", "visibility", "source"], weight: 1 },
+    { keywords: ["ingame", "game scene", "when scene", "switch scene"], weight: 3 },
+  ],
+  alert_chain: [
+    { keywords: ["alert", "follow", "sub", "cheer", "donate", "tip"], weight: 2 },
+    { keywords: ["raid", "gift", "redemption", "reward"], weight: 1 },
+  ],
+  chat_command: [
+    { keywords: ["command", "!cmd", "chat bot", "reply", "respond"], weight: 2 },
+    { keywords: ["bot say", "message trigger"], weight: 3 },
+  ],
+  global_state: [
+    { keywords: ["variable", "global", "counter", "state", "persist"], weight: 2 },
+    { keywords: ["remember", "store", "track", "keep", "save value"], weight: 2 },
+  ],
+  timed_event: [
+    { keywords: ["every", "timer", "interval", "schedule", "minutes", "hours"], weight: 2 },
+    { keywords: ["repeat", "periodic", "reminder", "countdown"], weight: 1 },
+  ],
+};
+
+const PATTERN_STEPS: Record<string, string[]> = {
+  scene_router: [
+    "Create primitive actions: overlay Show / Hide (OBS → Set Source Visibility)",
+    "Parent action with OBS → Current Program Scene Changed trigger",
+    "On scene change: Hide first, then If scene matches target → Show overlay",
+    "Test: trigger_primitive, subscribe_preset obs, get_current_scene",
+  ],
+  alert_chain: [
+    "Use a blocking Action Queue so alerts play one at a time",
+    "One action per alert type with Twitch trigger (Follow/Sub/Cheer/etc.)",
+    "subscribe_preset alerts to monitor events in MCP",
+  ],
+  chat_command: [
+    "Commands tab: add command trigger word",
+    "Link command to an action with sub-actions",
+    "Or use send_message / chat_reply C# template for bot replies",
+  ],
+  global_state: [
+    "Create bridge action 'MCP Set Global' (Set Global Variable sub-action using %name% %value% args)",
+    "Or generate_csharp_script template set_global",
+    "Use set_global_via_action from MCP to update without restart",
+  ],
+  timed_event: [
+    "Actions & Queues → Timers — add a timed trigger",
+    "Link to action",
+    "Test: do_action with args, then subscribe_preset streaming to watch",
+  ],
+  unclear: [
+    "Rephrase your goal with keywords: scene, alert, command, variable, or timer",
+    "Or call get_agent_guide section=workflows for pattern examples",
+  ],
+};
+
+function normalizeGoal(goal: string): string {
+  return goal.toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+export function scorePatterns(goal: string): Array<{ pattern: string; score: number; matched: string[] }> {
+  const normalized = normalizeGoal(goal);
+  const results: Array<{ pattern: string; score: number; matched: string[] }> = [];
+
+  for (const [pattern, bags] of Object.entries(PATTERNS)) {
+    let score = 0;
+    const matched: string[] = [];
+    for (const bag of bags) {
+      for (const kw of bag.keywords) {
+        if (normalized.includes(kw)) {
+          score += bag.weight;
+          matched.push(kw);
+        }
+      }
+    }
+    results.push({ pattern, score, matched: [...new Set(matched)] });
+  }
+
+  return results.sort((a, b) => b.score - a.score);
+}
+
+function confidenceFromScore(score: number): "high" | "medium" | "low" {
+  if (score >= 4) return "high";
+  if (score >= 2) return "medium";
+  return "low";
+}
+
+export function scoreActions(actions: ActionSummary[], goal: string): ActionSummary[] {
+  return actions
+    .map((a) => ({
+      action: a,
+      score: scoreTextMatch(`${a.name} ${a.group}`, goal),
+    }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 15)
+    .map((x) => x.action);
+}
+
+export function describeAutomationGoal(
+  goal: string,
+  actions: ActionSummary[]
+): {
+  goal: string;
+  pattern: string;
+  matched_keywords: string[];
+  confidence: "high" | "medium" | "low";
+  existing_matches: ActionSummary[];
+  steps: string[];
+  primitives_needed?: string[];
+  csharp_templates?: string[];
+  hint?: string;
+} {
+  const scored = scorePatterns(goal);
+  const top = scored[0];
+  const secondScore = scored[1]?.score ?? 0;
+
+  let pattern = top?.pattern ?? "unclear";
+  let matched_keywords = top?.matched ?? [];
+  let score = top?.score ?? 0;
+
+  if (score < 2) {
+    pattern = "unclear";
+    matched_keywords = [];
+  }
+
+  const confidence = pattern === "unclear" ? "low" : confidenceFromScore(score);
+  const steps = [...(PATTERN_STEPS[pattern] ?? PATTERN_STEPS.unclear)];
+
+  const primitives_needed =
+    pattern === "scene_router" ? ["overlay_show", "overlay_hide"] : undefined;
+  const csharp_templates =
+    pattern === "global_state"
+      ? ["set_global"]
+      : pattern === "chat_command"
+        ? ["chat_reply"]
+        : pattern === "scene_router"
+          ? ["obs_scene_router"]
+          : undefined;
+
+  const existing_matches = compactActions(scoreActions(actions, goal));
+
+  const result: ReturnType<typeof describeAutomationGoal> = {
+    goal,
+    pattern,
+    matched_keywords,
+    confidence,
+    existing_matches,
+    steps,
+    primitives_needed,
+    csharp_templates,
+  };
+
+  if (confidence === "low") {
+    result.hint = "Consider calling get_agent_guide workflows section for pattern examples.";
+  } else if (secondScore > 0 && top.score - secondScore <= 1) {
+    result.hint = `Pattern ${pattern} selected (${matched_keywords.join(", ")}). Similar: ${scored[1].pattern}.`;
+  }
+
+  return result;
+}
+
+function deriveRecommendedNext(result: ValidationResult): string {
+  if (!result.connected) return "connect";
+  if (!result.http_available) return "get_ui_walkthrough enable_http";
+  const subs = result.checks.find((c) => c.name === "event_subscription");
+  if (subs && !subs.pass) return "subscribe_preset streaming";
+  const bridge = result.checks.find((c) => c.name === "bridge_set_global");
+  if (bridge && !bridge.pass) return "get_bridge_setup_guide";
+  return "list_action_groups";
 }
 
 export async function validateSetup(
@@ -21,7 +199,6 @@ export async function validateSetup(
 ): Promise<ValidationResult> {
   const checks: ValidationResult["checks"] = [];
   const hints: string[] = [
-    "You do not need to edit actions.json — use Streamer.bot UI or Import, then test with do_action.",
     "Tell the AI your goal in plain language; it will use primitives, bridge actions, or C# templates.",
   ];
 
@@ -40,16 +217,29 @@ export async function validateSetup(
     checks.push({
       name: "websocket",
       pass: false,
-      message: String(e),
+      message: e instanceof Error ? e.message : String(e),
     });
   }
+
+  const httpStatus = await checkHttpServer(config.host, config.httpPort);
+  checks.push({
+    name: "http_server",
+    pass: httpStatus.available,
+    message: httpStatus.available
+      ? `HTTP server reachable on port ${config.httpPort} (${httpStatus.latency_ms}ms)`
+      : `HTTP server not reachable on port ${config.httpPort} — enable in Servers/Clients for do_action_http`,
+  });
 
   if (connected) {
     try {
       await client.getInfo();
       checks.push({ name: "get_info", pass: true, message: "Streamer.bot responded to GetInfo" });
     } catch (e) {
-      checks.push({ name: "get_info", pass: false, message: String(e) });
+      checks.push({
+        name: "get_info",
+        pass: false,
+        message: e instanceof Error ? e.message : String(e),
+      });
     }
 
     try {
@@ -62,15 +252,13 @@ export async function validateSetup(
       });
 
       for (const [key, actionName] of Object.entries(config.primitives)) {
-        const found = actions.find(
-          (a) => a.name.toLowerCase() === actionName.toLowerCase()
-        );
+        const found = actions.find((a) => a.name.toLowerCase() === actionName.toLowerCase());
         checks.push({
           name: `primitive_${key}`,
           pass: !!found,
           message: found
             ? `Primitive "${actionName}" found`
-            : `Optional primitive "${actionName}" not found — create in Background group or set STREAMERBOT_PRIMITIVES`,
+            : `Optional primitive "${actionName}" not found — set STREAMERBOT_PRIMITIVES`,
         });
       }
 
@@ -84,7 +272,11 @@ export async function validateSetup(
           : `Create action "${bridge}" with Set Global Variable sub-action (see get_bridge_setup_guide)`,
       });
     } catch (e) {
-      checks.push({ name: "actions_loaded", pass: false, message: String(e) });
+      checks.push({
+        name: "actions_loaded",
+        pass: false,
+        message: e instanceof Error ? e.message : String(e),
+      });
     }
 
     const subs = client.getSubscribedEvents();
@@ -94,87 +286,25 @@ export async function validateSetup(
       message:
         Object.keys(subs).length > 0
           ? `Subscribed to ${Object.keys(subs).length} categories`
-          : "Run subscribe_to_all_events or subscribe_preset",
+          : "Run subscribe_preset streaming or subscribe_to_all_events",
     });
   }
 
   if (config.dataPath) {
-    hints.push(`Data path set: ${config.dataPath} (read-only index when SB is stopped)`);
+    hints.push(`Data path set (read-only index when SB is stopped)`);
   }
 
   const ok = checks.every((c) => c.pass || c.name.startsWith("primitive_"));
-  return { ok, connected, checks, hints };
-}
-
-export function describeAutomationGoal(
-  goal: string,
-  actions: ActionSummary[]
-): {
-  goal: string;
-  suggestedPattern: string;
-  existingMatches: ActionSummary[];
-  recommendedSteps: string[];
-  primitivesToCreate?: string[];
-} {
-  const g = goal.toLowerCase();
-  let pattern = "general_action";
-  const steps: string[] = [];
-  const primitives: string[] = [];
-
-  if (/scene|obs|overlay|ingame|beat saber/i.test(g)) {
-    pattern = "scene_router";
-    steps.push(
-      "1. Create primitive actions: SE Overlay Show / Hide (OBS → Set Source Visibility on ingame/streamelementsoverlay)",
-      "2. Parent action 'scene changed' trigger: OBS → Current Program Scene Changed",
-      "3. On every scene change: run Hide first, then If scene == ingame → run Scene ingame (Show + your other steps)",
-      "4. Test with MCP: do_action scene changed, subscribe_preset obs, get_current_scene",
-    );
-    primitives.push("SE Overlay Show", "SE Overlay Hide");
-  } else if (/alert|follow|sub|cheer|donat/i.test(g)) {
-    pattern = "alert_chain";
-    steps.push(
-      "1. Use a blocking Action Queue for alerts so they play one at a time",
-      "2. One action per alert type with Trigger: Twitch → Follow/Sub/etc.",
-      "3. subscribe_preset alerts to monitor events in MCP",
-    );
-  } else if (/command|chat|!\\w+/i.test(g)) {
-    pattern = "chat_command";
-    steps.push(
-      "1. Commands tab: add command trigger word",
-      "2. Link command to an action with sub-actions",
-      "3. Or use send_message / chat_reply C# template for bot replies",
-    );
-  } else if (/global|variable|counter|state/i.test(g)) {
-    pattern = "global_state";
-    steps.push(
-      "1. Create bridge action 'MCP Set Global' (Set Global Variable sub-action using %name% %value% args)",
-      "2. Or generate_csharp_script template set_global",
-      "3. Use set_global_via_action from MCP to update without restart",
-    );
-  } else {
-    steps.push(
-      "1. find_actions / list_action_groups to see what already exists",
-      "2. do_action to test an existing action",
-      "3. generate_csharp_script if custom logic is needed",
-      "4. User adds sub-actions in Streamer.bot UI (live, no restart) — AI guides steps",
-    );
-  }
-
-  const keywords = goal.split(/\s+/).filter((w) => w.length > 3);
-  let matches = actions;
-  for (const kw of keywords.slice(0, 5)) {
-    const m = findActions(actions, kw);
-    if (m.length) matches = m;
-  }
-  matches = matches.slice(0, 15);
-
-  return {
-    goal,
-    suggestedPattern: pattern,
-    existingMatches: matches,
-    recommendedSteps: steps,
-    primitivesToCreate: primitives.length ? primitives : undefined,
+  const partial: ValidationResult = {
+    ok,
+    connected,
+    http_available: httpStatus.available,
+    recommended_next: "",
+    checks,
+    hints,
   };
+  partial.recommended_next = deriveRecommendedNext(partial);
+  return partial;
 }
 
 export function getBridgeSetupGuide(config: AppConfig): {
@@ -229,7 +359,7 @@ export function getImportChecklist(goal: string): string[] {
     "Open Streamer.bot → toolbar → Import",
     "Paste import string (from community or AI-generated export)",
     "Review items — Right-click to Include/Exclude and Overwrite",
-    "Confirm OBS source/scene names match your setup (ingame, streamelementsoverlay, etc.)",
+    "Confirm OBS source/scene names match your setup",
     "Click Import — applies immediately without restart",
     `Goal context: ${goal}`,
     "Run validate_setup via MCP to confirm actions exist",

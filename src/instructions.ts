@@ -1,63 +1,68 @@
 /**
- * Agent-facing guide embedded in MCP server metadata and get_agent_guide tool.
+ * Agent-facing guide — structured for section-level retrieval (<600 tokens full).
  */
 
-export const AGENT_INSTRUCTIONS = `# Streamerbot MCP — Agent Operating Guide
+export interface AgentInstructions {
+  rules: string[];
+  workflows: Record<string, string>;
+  cheatsheet: Record<string, string>;
+  limits: string[];
+}
 
-You are helping a streamer who may never open Streamer.bot themselves. Your job is to achieve their goal using MCP tools and clear UI steps they can follow if needed.
+export const AGENT_INSTRUCTIONS: AgentInstructions = {
+  rules: [
+    "Never edit actions.json while Streamer.bot is running.",
+    "Run validate_setup at session start.",
+    "Discover before running: list_action_groups → find_actions → do_action.",
+    "Use test_action (not do_action) when you need to verify an automation worked.",
+    "All destructive tools require confirm=true.",
+    "Explain actions to the user in plain language — no WS jargon.",
+  ],
+  workflows: {
+    scene_overlay:
+      "describe_automation → trigger_primitive overlay_show/hide → test_action → subscribe_preset obs → get_current_scene",
+    alert: "describe_automation → subscribe_preset alerts → wait_for_event → test_action",
+    chat_command: "get_commands → do_action on command action → send_message (confirm=true)",
+    global_state: "get_bridge_setup_guide → set_global_via_action OR generate_csharp_script set_global",
+    timed: "describe_automation → get_ui_walkthrough create_action → do_action to test",
+  },
+  cheatsheet: {
+    "See what exists": "list_action_groups, find_actions",
+    "Run something": "do_action, trigger_primitive",
+    "Verify it worked": "test_action, wait_for_event, summarize_recent_events",
+    "Current OBS scene": "get_current_scene",
+    "Fix connection": "connect, validate_setup",
+    "Custom logic": "generate_csharp_script, get_ui_walkthrough",
+    "Plan automation": "describe_automation",
+    "Check HTTP": "get_http_status",
+  },
+  limits: [
+    "Cannot create/edit action definitions remotely (Streamer.bot has no write API).",
+    "Cannot set globals without a bridge action (see get_bridge_setup_guide).",
+    "Disk index (inspect_actions_from_disk) is only safe when Streamer.bot is stopped.",
+  ],
+};
 
-## Golden rules
+export type AgentGuideSection = keyof AgentInstructions;
 
-1. **Never edit actions.json while Streamer.bot is running** — it will not reload. Use Streamer.bot UI (live) or Import, then test with \`do_action\`.
-2. **Prefer runtime tools**: \`do_action\`, \`execute_code_trigger\`, \`set_global_via_action\`, \`send_message\`.
-3. **Discover before dumping**: \`list_action_groups\` → \`find_actions\` → \`get_action_detail\` (not full get_actions unless necessary).
-4. **Start with** \`validate_setup\` when beginning a session.
-5. **Plain language for the user** — explain what you did in one sentence, not WebSocket jargon.
+export function getAgentGuideSection(
+  section?: AgentGuideSection
+): AgentInstructions | AgentInstructions[AgentGuideSection] {
+  if (!section) return AGENT_INSTRUCTIONS;
+  return AGENT_INSTRUCTIONS[section];
+}
 
-## Typical workflows
+const WALKTHROUGH_MINUTES: Record<string, number> = {
+  create_action: 2,
+  add_obs_source_visibility: 3,
+  add_obs_scene_trigger: 3,
+  add_set_global_bridge: 5,
+  import_extension: 3,
+  enable_websocket: 2,
+  enable_http: 2,
+};
 
-### "When X happens, do Y"
-- find_actions for existing triggers
-- If missing: guide user to add Trigger in UI OR use \`generate_csharp_script\` + \`get_ui_walkthrough\`
-- Wire: OBS/Twitch trigger → action → sub-actions
-- Test: \`test_action\`, \`wait_for_event\`, \`subscribe_preset\`
-
-### Scene / overlay (e.g. show overlay in ingame only)
-- Pattern: scene_router — primitives Show/Hide + parent "scene changed"
-- \`describe_automation\` for plan
-- \`trigger_primitive\` overlay_show / overlay_hide for tests
-
-### Chat / commands
-- get_commands, do_action on command's action
-- send_message for bot chat
-
-### Variables / state
-- set_global_via_action (requires bridge action — see get_bridge_setup_guide)
-- generate_csharp_script set_global
-
-## Tools cheat sheet
-
-| User wants | Use |
-|------------|-----|
-| See what exists | list_action_groups, find_actions |
-| Run something | do_action, trigger_primitive, test_action |
-| Watch stream | subscribe_preset, wait_for_event, summarize_recent_events |
-| Current OBS scene | get_current_scene |
-| Fix connection | connect, validate_setup |
-| Custom logic | generate_csharp_script, get_ui_walkthrough |
-| Plan automation | describe_automation |
-
-## C# scripts
-
-When sub-actions are not enough, use \`generate_csharp_script\`. User pastes into Streamer.bot → Sub-Actions → C# → Execute C# Code → Compile. No restart needed.
-
-## What MCP cannot do
-
-- Create/edit action definitions remotely (no API) — user UI or Import only
-- Set globals directly — use bridge action or C# 
-`;
-
-export function getUiWalkthrough(topic: string): string[] {
+export function getUiWalkthrough(topic: string): { steps: string[]; estimated_minutes: number } {
   const steps: Record<string, string[]> = {
     create_action: [
       "Open Streamer.bot → Actions & Queues → Actions",
@@ -94,9 +99,12 @@ export function getUiWalkthrough(topic: string): string[] {
       "Servers/Clients → HTTP Server → Auto Start optional → Port 7474 → Start",
     ],
   };
-  return (
-    steps[topic] ?? [
-      "Available topics: create_action, add_obs_source_visibility, add_obs_scene_trigger, add_set_global_bridge, import_extension, enable_websocket, enable_http",
-    ]
-  );
+
+  const list = steps[topic] ?? [
+    "Available topics: create_action, add_obs_source_visibility, add_obs_scene_trigger, add_set_global_bridge, import_extension, enable_websocket, enable_http",
+  ];
+  return {
+    steps: list,
+    estimated_minutes: WALKTHROUGH_MINUTES[topic] ?? 3,
+  };
 }

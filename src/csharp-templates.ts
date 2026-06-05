@@ -37,7 +37,7 @@ export function generateCSharp(
     case "custom_trigger":
       return customTriggerTemplate(params);
     default:
-      return setGlobalTemplate(params);
+      throw new Error(`Unknown template: ${templateId}`);
   }
 }
 

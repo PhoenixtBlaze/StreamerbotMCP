@@ -46,6 +46,9 @@ export class StreamerbotClient extends EventEmitter {
   private connectPromise: Promise<void> | null = null;
   private lastScene: { name?: string; timestamp: string } | null = null;
   private cachedEventCategories: Record<string, string[]> | null = null;
+  private subscriptionCallTimestamps: number[] = [];
+  private static readonly SUBSCRIPTION_WINDOW_MS = 10_000;
+  private static readonly SUBSCRIPTION_MAX_CALLS = 3;
 
   constructor(config?: Partial<AppConfig> & { autoReconnect?: boolean; reconnectInterval?: number }) {
     super();
@@ -381,7 +384,19 @@ export class StreamerbotClient extends EventEmitter {
     return res;
   }
 
+  private checkSubscriptionRateLimit(): void {
+    const now = Date.now();
+    this.subscriptionCallTimestamps = this.subscriptionCallTimestamps.filter(
+      (t) => now - t < StreamerbotClient.SUBSCRIPTION_WINDOW_MS
+    );
+    if (this.subscriptionCallTimestamps.length >= StreamerbotClient.SUBSCRIPTION_MAX_CALLS) {
+      throw new Error("Too many subscription calls in 10s. Wait before resubscribing.");
+    }
+    this.subscriptionCallTimestamps.push(now);
+  }
+
   async subscribeToEvents(events: Record<string, string[]>) {
+    this.checkSubscriptionRateLimit();
     for (const [category, eventList] of Object.entries(events)) {
       const existing = this.subscribedEvents.get(category) ?? [];
       this.subscribedEvents.set(category, [...new Set([...existing, ...eventList])]);
