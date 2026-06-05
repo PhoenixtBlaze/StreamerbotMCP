@@ -13,7 +13,7 @@ An **agent-native** [MCP](https://modelcontextprotocol.io/) server for [Streamer
 3. Tell your AI: *“Set up my stream so the StreamElements overlay only shows in my ingame scene.”*
 4. The agent runs `validate_setup`, plans with `describe_automation`, guides you through a few UI clicks if needed, and tests with `do_action` — **no bot restart**.
 
-Read [docs/live-dev-workflow.md](docs/live-dev-workflow.md) and [docs/automation-patterns.md](docs/automation-patterns.md).
+Use the **Agent workflow** section below, or ask your AI to call `get_agent_guide` for the full operating guide.
 
 ---
 
@@ -92,7 +92,7 @@ npm run build
 
 ### Setup & guidance
 
-`get_agent_guide`, `validate_setup`, `get_ui_walkthrough`, `get_bridge_setup_guide`, `get_import_checklist`, `describe_automation`
+`get_agent_guide`, `validate_setup`, `get_http_status`, `get_ui_walkthrough`, `get_bridge_setup_guide`, `get_import_checklist`, `describe_automation`
 
 ### Connection
 
@@ -100,11 +100,11 @@ npm run build
 
 ### Actions (compact + run)
 
-`list_action_groups`, `list_actions_in_group`, `find_actions`, `get_action_detail`, `get_actions`, `do_action`, `do_action_http`, `test_action`, `trigger_primitive`
+`list_action_groups`, `list_actions_in_group`, `find_actions`, `check_action_exists`, `get_action_detail`, `get_actions`, `do_action`, `do_action_http`, `test_action`, `trigger_primitive`
 
 ### Events & OBS
 
-`subscribe_preset`, `subscribe_to_events`, `subscribe_to_all_events`, `get_recent_events`, `summarize_recent_events`, `wait_for_event`, `get_current_scene`, …
+`subscribe_preset`, `list_event_categories`, `subscribe_to_events`, `subscribe_to_all_events`, `get_recent_events`, `summarize_recent_events`, `wait_for_event`, `get_current_scene`, …
 
 ### State & chat
 
@@ -126,10 +126,13 @@ Full list: build and inspect `src/index.ts` or ask the agent to call `get_agent_
 
 | URI | Description |
 |-----|-------------|
-| `streamerbot://agent-guide` | Agent operating guide (markdown) |
+| `streamerbot://agent-guide` | Structured agent guide (JSON) |
 | `streamerbot://actions-summary` | Compact group summary |
-| `streamerbot://connection` | Connection + last scene |
+| `streamerbot://connection` | Connection, HTTP status, subscriptions |
 | `streamerbot://event-buffer` | Summarized recent events |
+| `streamerbot://http-status` | HTTP server availability and latency |
+
+MCP prompts: `scene_overlay_router`, `alert_chain_setup`, `chat_command_setup`
 
 ---
 
@@ -139,15 +142,6 @@ Full list: build and inspect `src/index.ts` or ask the agent to call `get_agent_
 npm run build
 npm start
 ```
-
----
-
-## Docs
-
-- [Live dev workflow (no restart)](docs/live-dev-workflow.md)
-- [Automation patterns](docs/automation-patterns.md)
-- [Scene overlay template](templates/scene-overlay-router.md)
-- [Roadmap / implemented features](docs/ROADMAP.md)
 
 ---
 
